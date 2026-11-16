@@ -2,6 +2,8 @@ import { SignOutButton } from "@/components/layout/sign-out-button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { requireUser } from "@/features/auth/get-auth-context";
 
+export const instant = false;
+
 export default async function PendingAccountPage() {
   const user = await requireUser();
 

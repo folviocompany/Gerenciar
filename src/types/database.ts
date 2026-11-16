@@ -151,6 +151,13 @@ export type ExpenseRow = {
   created_by: string;
 } & Timestamps;
 
+export type ExpenseCategoryRow = {
+  id: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+};
+
 export type ReturnReminderRow = {
   id: string;
   client_id: string;
@@ -228,6 +235,12 @@ export type Database = {
         Row: PaymentRow;
         Insert: Omit<PaymentRow, "id" | "created_at"> & Partial<Pick<PaymentRow, "id" | "notes">>;
         Update: Partial<PaymentRow>;
+        Relationships: [];
+      };
+      expense_categories: {
+        Row: ExpenseCategoryRow;
+        Insert: Pick<ExpenseCategoryRow, "name"> & Partial<ExpenseCategoryRow>;
+        Update: Partial<ExpenseCategoryRow>;
         Relationships: [];
       };
       expenses: {

@@ -1,0 +1,25 @@
+type Table<Row, Insert = Partial<Row>> = { Row: Row; Insert: Insert; Update: Partial<Insert>; Relationships: [] };
+export type Profile = { id: string; display_name: string; active: boolean; created_at: string; updated_at: string };
+export type Professional = { id: string; user_id: string; specialty: string; color: string; created_at: string; updated_at: string };
+export type Procedure = { id: string; professional_id: string; name: string; description: string | null; category: string; price_cents: number; duration_minutes: number; return_interval_days: number | null; requires_return_confirmation: boolean; active: boolean; created_at: string; updated_at: string };
+export type Client = { id: string; full_name: string; phone_digits: string; birth_date: string | null; reference_professional_id: string | null; notes: string | null; whatsapp_allowed: boolean; active: boolean; created_by: string; updated_by: string; created_at: string; updated_at: string };
+export type Receivable = { id: string; professional_id: string; client_id: string | null; procedure_id: string | null; description: string; amount_cents: number; service_date: string; due_date: string; status: 'pending' | 'partially_paid' | 'paid' | 'cancelled'; created_by: string; updated_by: string; created_at: string; updated_at: string };
+export type Payment = { id: string; receivable_id: string; amount_cents: number; paid_at: string; payment_method: PaymentMethod; notes: string | null; created_by: string; created_at: string };
+export type Expense = { id: string; description: string; category: string; amount_cents: number; competence_date: string; due_date: string; paid_at: string | null; responsibility: 'individual' | 'shared'; professional_id: string | null; payment_method: PaymentMethod | null; status: 'planned' | 'pending' | 'paid' | 'cancelled'; notes: string | null; created_by: string; updated_by: string; created_at: string; updated_at: string };
+export type PaymentMethod = 'pix' | 'cash' | 'debit_card' | 'credit_card' | 'transfer' | 'other';
+export type Database = { public: { Tables: {
+  profiles: Table<Profile>;
+  professionals: Table<Professional>;
+  procedures: Table<Procedure>;
+  clients: Table<Client>;
+  receivables: Table<Receivable>;
+  payments: Table<Payment>;
+  expenses: Table<Expense>;
+  rooms: Table<{ id: string; name: string; active: boolean; created_at: string; updated_at: string }>;
+  business_settings: Table<{ id: number; name: string; timezone: string; currency: string; created_at: string; updated_at: string }>;
+  audit_logs: Table<{ id: string; actor_id: string | null; table_name: string; record_id: string; action: string; created_at: string }>;
+}; Views: { [_ in never]: never }; Functions: {
+  is_active_member: { Args: Record<string, never>; Returns: boolean };
+  own_professional_id: { Args: Record<string, never>; Returns: string };
+  register_receivable: { Args: { p_description: string; p_amount_cents: number; p_service_date: string; p_due_date: string; p_client_id: string | null; p_procedure_id: string | null; p_initial_payment_cents: number; p_payment_method: string | null; p_paid_at: string | null }; Returns: string };
+}; Enums: { [_ in never]: never }; CompositeTypes: { [_ in never]: never } } };

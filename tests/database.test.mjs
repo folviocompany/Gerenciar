@@ -1,0 +1,122 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { PGlite } from '@electric-sql/pglite';
+
+const db = new PGlite();
+const ester = '10000000-0000-0000-0000-000000000001';
+const izabela = '10000000-0000-0000-0000-000000000002';
+const outsider = '10000000-0000-0000-0000-000000000003';
+const p1 = '20000000-0000-0000-0000-000000000001';
+const p2 = '20000000-0000-0000-0000-000000000002';
+async function asUser(id, query, params = []) {
+  await db.exec('set role authenticated');
+  await db.query("select set_config('request.jwt.claim.sub', $1, false)", [id]);
+  try { return await db.query(query, params); }
+  finally { await db.exec('reset role'); await db.exec("reset request.jwt.claim.sub"); }
+}
+before(async () => {
+  await db.exec(`create role anon nologin; create role authenticated nologin;
+    create schema auth; create table auth.users (id uuid primary key);
+    create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+    grant usage on schema auth to authenticated; grant execute on function auth.uid() to authenticated;`);
+  await db.exec(await readFile(new URL('../supabase/migrations/202611110001_foundation.sql', import.meta.url), 'utf8'));
+  await db.exec(await readFile(new URL('../supabase/migrations/202611140001_clients.sql', import.meta.url), 'utf8'));
+  await db.exec(await readFile(new URL('../supabase/migrations/202611150001_financial_foundation.sql', import.meta.url), 'utf8'));
+  await db.query('insert into auth.users (id) values ($1), ($2), ($3)', [ester, izabela, outsider]);
+  await db.query("insert into profiles (id, display_name) values ($1, 'Profissional A'), ($2, 'Profissional B')", [ester, izabela]);
+  await db.query("insert into professionals (id, user_id, specialty) values ($1, $2, 'Área A'), ($3, $4, 'Área B')", [p1, ester, p2, izabela]);
+  await asUser(ester, "insert into procedures (professional_id, name, category, price_cents, duration_minutes) values ($1, 'Serviço A', 'A', 15000, 60)", [p1]);
+  await asUser(izabela, "insert into procedures (professional_id, name, category, price_cents, duration_minutes) values ($1, 'Serviço B', 'B', 20000, 45)", [p2]);
+});
+after(async () => { await db.close(); });
+test('cada profissional vê somente seu catálogo', async () => {
+  assert.deepEqual((await asUser(ester, 'select name from procedures')).rows, [{ name: 'Serviço A' }]);
+  assert.deepEqual((await asUser(izabela, 'select name from procedures')).rows, [{ name: 'Serviço B' }]);
+});
+test('não permite cadastrar ou alterar procedimento de outra profissional', async () => {
+  await assert.rejects(asUser(ester, "insert into procedures (professional_id, name, category, duration_minutes) values ($1, 'Invasão', 'A', 60)", [p2]), /row-level security/);
+  assert.equal((await asUser(ester, "update procedures set price_cents = 1 where professional_id = $1 returning id", [p2])).rows.length, 0);
+  await assert.rejects(asUser(ester, 'update procedures set professional_id = $1', [p2]), /permission denied/);
+});
+test('não permite elevar permissões ou apagar histórico', async () => {
+  await assert.rejects(asUser(ester, 'update profiles set active = true'), /permission denied/);
+  await assert.rejects(asUser(ester, 'delete from procedures'), /permission denied/);
+  await assert.rejects(asUser(ester, 'delete from audit_logs'), /permission denied/);
+});
+test('conta Auth sem vínculo administrativo não acessa dados', async () => {
+  for (const table of ['profiles', 'professionals', 'procedures', 'clients', 'rooms', 'business_settings', 'audit_logs']) {
+    assert.equal((await asUser(outsider, `select * from ${table}`)).rows.length, 0);
+  }
+});
+test('usuário anônimo não acessa tabelas', async () => {
+  await db.exec('set role anon');
+  try { await assert.rejects(db.query('select * from procedures'), /permission denied/); }
+  finally { await db.exec('reset role'); }
+});
+test('valida dinheiro, duração e duplicidade no banco', async () => {
+  await assert.rejects(asUser(ester, 'update procedures set price_cents = -1'), /check constraint/);
+  await assert.rejects(asUser(ester, 'update procedures set duration_minutes = 0'), /check constraint/);
+  await assert.rejects(asUser(ester, "insert into procedures (professional_id, name, category, duration_minutes) values ($1, ' serviço a ', 'A', 60)", [p1]), /unique constraint/);
+});
+test('alteração própria funciona e registra auditoria sem dados pessoais', async () => {
+  await asUser(ester, 'update procedures set price_cents = 17000');
+  assert.equal(Number((await asUser(ester, 'select price_cents from procedures')).rows[0].price_cents), 17000);
+  const logs = (await asUser(ester, 'select * from audit_logs')).rows;
+  assert.ok(logs.some(log => log.action === 'UPDATE' && log.table_name === 'procedures'));
+  assert.ok(logs.every(log => log.actor_id === ester && !('payload' in log)));
+});
+test('desativação revoga leitura e escrita mesmo com sessão existente', async () => {
+  await db.query('update profiles set active = false where id = $1', [ester]);
+  try {
+    assert.equal((await asUser(ester, 'select * from procedures')).rows.length, 0);
+    await assert.rejects(asUser(ester, "insert into procedures (professional_id, name, category, duration_minutes) values ($1, 'Novo', 'A', 60)", [p1]), /row-level security/);
+  } finally { await db.query('update profiles set active = true where id = $1', [ester]); }
+});
+
+test('cadastro de cliente é compartilhado entre as profissionais', async () => {
+  await asUser(ester, "insert into clients (full_name, phone_digits, whatsapp_allowed) values ('Cliente Compartilhada', '92999999999', true)");
+  const visibleToIzabela = await asUser(izabela, "select full_name, whatsapp_allowed from clients where phone_digits = '92999999999'");
+  assert.deepEqual(visibleToIzabela.rows, [{ full_name: 'Cliente Compartilhada', whatsapp_allowed: true }]);
+  await asUser(izabela, "update clients set notes = 'Preferência administrativa' where phone_digits = '92999999999'");
+  assert.equal((await asUser(ester, "select notes from clients where phone_digits = '92999999999'")).rows[0].notes, 'Preferência administrativa');
+});
+
+test('impede duplicidade exata e preserva autoria no banco', async () => {
+  await assert.rejects(asUser(izabela, "insert into clients (full_name, phone_digits) values (' cliente compartilhada ', '92999999999')"), /unique constraint/);
+  const client = (await asUser(ester, "select created_by, updated_by from clients where phone_digits = '92999999999'")).rows[0];
+  assert.equal(client.created_by, ester);
+  assert.equal(client.updated_by, izabela);
+});
+
+test('cliente não pode ser apagada pela aplicação', async () => {
+  await assert.rejects(asUser(ester, "delete from clients where phone_digits = '92999999999'"), /permission denied/);
+});
+
+test('receita com pagamento parcial não duplica faturamento', async () => {
+  const result = await asUser(ester, "select register_receivable('Atendimento teste', 30000, '2026-11-15', '2026-11-15', null, null, 10000, 'pix', '2026-11-15') as id");
+  const id = result.rows[0].id;
+  const receivable = (await asUser(ester, 'select amount_cents, status from receivables where id = $1', [id])).rows[0];
+  assert.equal(Number(receivable.amount_cents), 30000);
+  assert.equal(receivable.status, 'partially_paid');
+  assert.equal(Number((await asUser(ester, 'select sum(amount_cents) as paid from payments where receivable_id = $1', [id])).rows[0].paid), 10000);
+});
+
+test('impede pagamento acima do saldo e pagamento em receita alheia', async () => {
+  const receivableId = (await asUser(ester, "select id from receivables where description = 'Atendimento teste'")).rows[0].id;
+  await assert.rejects(asUser(ester, "insert into payments (receivable_id, amount_cents, paid_at, payment_method) values ($1, 25000, '2026-11-15', 'pix')", [receivableId]), /excede o saldo/);
+  await assert.rejects(asUser(izabela, "insert into payments (receivable_id, amount_cents, paid_at, payment_method) values ($1, 1000, '2026-11-15', 'pix')", [receivableId]), /row-level security|não autorizado/);
+});
+
+test('despesas individuais e compartilhadas respeitam responsabilidade', async () => {
+  await asUser(ester, "insert into expenses (description, category, amount_cents, competence_date, due_date, responsibility, professional_id, status) values ('Material', 'Insumos', 5000, '2026-11-01', '2026-11-10', 'individual', $1, 'pending')", [p1]);
+  await asUser(izabela, "insert into expenses (description, category, amount_cents, competence_date, due_date, paid_at, responsibility, professional_id, payment_method, status) values ('Aluguel', 'Estrutura', 100000, '2026-11-01', '2026-11-05', '2026-11-05', 'shared', null, 'pix', 'paid')");
+  assert.equal((await asUser(ester, 'select * from expenses')).rows.length, 2);
+  await assert.rejects(asUser(ester, "insert into expenses (description, category, amount_cents, competence_date, due_date, responsibility, professional_id, status) values ('Invasão', 'Teste', 100, '2026-11-01', '2026-11-01', 'individual', $1, 'pending')", [p2]), /row-level security/);
+});
+
+test('não permite apagar lançamentos financeiros', async () => {
+  await assert.rejects(asUser(ester, 'delete from receivables'), /permission denied/);
+  await assert.rejects(asUser(ester, 'delete from payments'), /permission denied/);
+  await assert.rejects(asUser(ester, 'delete from expenses'), /permission denied/);
+});
